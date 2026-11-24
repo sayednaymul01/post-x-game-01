@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon Serpent — built from one prompt</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; padding: 20px;
+    background: #070812; color: #e8e9ff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  h1 {
+    margin: 0; font-size: 28px; letter-spacing: 2px; color: #39ffca;
+    text-shadow: 0 0 12px #39ffca, 0 0 34px #0affef55;
+  }
+  .prompt {
+    max-width: 520px; padding: 10px 14px; border: 1px solid #2a2d55;
+    border-radius: 10px; background: #0d0f22; color: #aab; font-size: 13px;
+  }
+  .prompt b { color: #ffd166; }
+  #hud { display: flex; gap: 22px; font-size: 16px; }
+  #hud span b { color: #39ffca; }
+  canvas {
+    background: #0a0c1d; border: 2px solid #39ffca; border-radius: 8px;
+    box-shadow: 0 0 24px #39ffca44, inset 0 0 24px #000;
+    max-width: 92vw; height: auto; touch-action: none;
+  }
+  #msg { min-height: 22px; font-size: 16px; color: #ffd166; text-align: center; }
+  button {
+    font: inherit; cursor: pointer; color: #071018; background: #39ffca;
+    border: 0; border-radius: 8px; padding: 9px 20px; font-weight: 700;
+  }
+  #pad { display: none; grid-template-columns: repeat(3, 58px); gap: 6px; }
+  #pad button { padding: 12px 0; background: #171a38; color: #39ffca; border: 1px solid #2a2d55; }
+  @media (pointer: coarse) { #pad { display: grid; } }
+  .hint { color: #778; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>NEON SERPENT</h1>
+<div class="prompt"><b>The one prompt:</b> “Build me a neon snake game in one page:
+eat the orbs, grow longer, don't bite yourself — with a score, a best score,
+and a restart when it's over.” Everything below is what the agent made from it.</div>
+<div id="hud"><span>Score <b id="score">0</b></span><span>Best <b id="best">0</b></span><span>Speed <b id="speed">1</b></span></div>
+<canvas id="game" width="480" height="480"></canvas>
+<div id="msg">Press any arrow key or tap Start.</div>
+<button id="startBtn">▶ Start</button>
+<div id="pad">
+  <span></span><button data-dir="up">▲</button><span></span>
+  <button data-dir="left">◀</button><button data-dir="down">▼</button><button data-dir="right">▶</button>
+</div>
+<div class="hint">Arrow keys / WASD to steer · Space to pause · On touch screens use the pad or swipe</div>
+<script>
+'use strict';
+// ---- Board and state -------------------------------------------------------
+const COLS = 24, ROWS = 24, CELL = 20;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const bestEl = document.getElementById('best');
+const speedEl = document.getElementById('speed');
+const msgEl = document.getElementById('msg');
+
+let snake, dir, nextDir, food, score, best, tickMs, timer, running, paused;
+best = Number(localStorage.getItem('neonSerpentBest') || 0);
+bestEl.textContent = best;
+
+function reset() {
+  snake = [{ x: 11, y: 12 }, { x: 10, y: 12 }, { x: 9, y: 12 }];
+  dir = { x: 1, y: 0 };
+  nextDir = dir;
+  score = 0;
+  tickMs = 150;
+  paused = false;
+  placeFood();
+  draw();
+  updateHud();
+}
+
+function placeFood() {
+  // Drop the orb on a random free cell; re-roll while it lands on the snake.
+  for (;;) {
+    const cell = {
+      x: Math.floor(Math.random() * COLS),
+      y: Math.floor(Math.random() * ROWS),
+    };
+    if (!snake.some(s => s.x === cell.x && s.y === cell.y)) { food = cell; return; }
+  }
+}
+
+function updateHud() {
+  scoreEl.textContent = score;
+  bestEl.textContent = best;
+  speedEl.textContent = Math.max(1, Math.round(150 / tickMs * 10) / 10);
+}
+
+// ---- Input -----------------------------------------------------------------
+const DIRS = {
+  up: { x: 0, y: -1 }, down: { x: 0, y: 1 },
+  left: { x: -1, y: 0 }, right: { x: 1, y: 0 },
+};
+function steer(name) {
+  const d = DIRS[name];
+  if (!d) return;
+  // Never allow a 180-degree turn: that is an instant self-bite.
+  if (d.x === -dir.x && d.y === -dir.y) return;
+  nextDir = d;
+  if (!running) start();
+}
+
+document.addEventListener('keydown', (e) => {
+  const key = e.key.toLowerCase();
+  if (key === 'arrowup' || key === 'w') steer('up');
+  else if (key === 'arrowdown' || key === 's') steer('down');
+  else if (key === 'arrowleft' || key === 'a') steer('left');
+  else if (key === 'arrowright' || key === 'd') steer('right');
+  else if (key === ' ') { e.preventDefault(); togglePause(); }
+  if (key.startsWith('arrow')) e.preventDefault();
+});
+
+document.querySelectorAll('#pad button').forEach((b) => {
+  b.addEventListener('click', () => steer(b.dataset.dir));
+});
+
+// Swipe steering for touch screens.
+let touchStart = null;
+canvas.addEventListener('touchstart', (e) => {
+  touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+}, { passive: true });
+canvas.addEventListener('touchend', (e) => {
+  if (!touchStart) return;
+  const dx = e.changedTouches[0].clientX - touchStart.x;
+  const dy = e.changedTouches[0].clientY - touchStart.y;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) > 24) {
+    steer(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+  }
+  touchStart = null;
+}, { passive: true });
+
+// ---- The game loop ---------------------------------------------------------
+function step() {
+  dir = nextDir;
+  const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+  const hitWall = head.x < 0 || head.y < 0 || head.x >= COLS || head.y >= ROWS;
+  const hitSelf = snake.some(s => s.x === head.x && s.y === head.y);
+  if (hitWall || hitSelf) return gameOver();
+
+  snake.unshift(head);
+  if (head.x === food.x && head.y === food.y) {
+    score += 10;
+    // Every fifth orb the serpent gets a little faster.
+    if (score % 50 === 0 && tickMs > 70) { tickMs -= 10; restartTimer(); }
+    placeFood();
+  } else {
+    snake.pop();
+  }
+  draw();
+  updateHud();
+}
+
+function restartTimer() {
+  clearInterval(timer);
+  timer = setInterval(step, tickMs);
+}
+
+function start() {
+  if (running) return;
+  running = true;
+  msgEl.textContent = '';
+  document.getElementById('startBtn').textContent = '↻ Restart';
+  restartTimer();
+}
+
+function togglePause() {
+  if (!running) return;
+  paused = !paused;
+  if (paused) { clearInterval(timer); msgEl.textContent = 'Paused — space to resume.'; }
+  else { restartTimer(); msgEl.textContent = ''; }
+}
+
+function gameOver() {
+  clearInterval(timer);
+  running = false;
+  if (score > best) {
+    best = score;
+    localStorage.setItem('neonSerpentBest', String(best));
+  }
+  updateHud();
+  msgEl.textContent = 'Game over — score ' + score + '. Press Start to play again.';
+  draw(true);
+}
+
+document.getElementById('startBtn').addEventListener('click', () => { reset(); start(); });
+
+// ---- Drawing ---------------------------------------------------------------
+function draw(over) {
+  ctx.fillStyle = '#0a0c1d';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Faint grid so the board reads on camera.
+  ctx.strokeStyle = '#161a36';
+  ctx.beginPath();
+  for (let i = 1; i < COLS; i++) { ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, canvas.height); }
+  for (let i = 1; i < ROWS; i++) { ctx.moveTo(0, i * CELL); ctx.lineTo(canvas.width, i * CELL); }
+  ctx.stroke();
+
+  // The orb, pulsing pink.
+  const pulse = 3 + Math.sin(Date.now() / 200) * 1.2;
+  ctx.fillStyle = '#ff4d8d';
+  ctx.shadowColor = '#ff4d8d';
+  ctx.shadowBlur = 16;
+  ctx.beginPath();
+  ctx.arc(food.x * CELL + CELL / 2, food.y * CELL + CELL / 2, CELL / 2 - pulse, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // The serpent: bright head, fading tail.
+  snake.forEach((s, i) => {
+    const t = i / Math.max(1, snake.length - 1);
+    ctx.fillStyle = over && i === 0 ? '#ff5555' : 'rgb(' + Math.round(57 + 140 * t) + ', 255, ' + Math.round(202 - 110 * t) + ')';
+    ctx.shadowColor = '#39ffca';
+    ctx.shadowBlur = i === 0 ? 14 : 0;
+    ctx.fillRect(s.x * CELL + 1.5, s.y * CELL + 1.5, CELL - 3, CELL - 3);
+    ctx.shadowBlur = 0;
+  });
+
+  if (over) {
+    ctx.fillStyle = 'rgba(4, 5, 14, 0.72)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ff5555';
+    ctx.font = 'bold 40px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2 - 8);
+    ctx.fillStyle = '#e8e9ff';
+    ctx.font = '18px ui-monospace, monospace';
+    ctx.fillText('Score ' + score + ' · Best ' + best, canvas.width / 2, canvas.height / 2 + 26);
+  }
+}
+
+reset();
+</script>
+</body>
+</html>
